@@ -38,6 +38,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "vector_store" not in st.session_state:
+    # Ensure the index directory exists before attempting to load
+    os.makedirs(DEFAULT_INDEX_DIR, exist_ok=True)
     # Attempt to load previously persisted FAISS index if available
     st.session_state.vector_store = load_vector_store(DEFAULT_INDEX_DIR)
 

@@ -93,7 +93,7 @@ def call_gemini(
 def call_groq(
     prompt: str,
     api_key: str,
-    model: str = "llama-3.3-70b-versatile",
+    model: str = "llama-3.1-8b-instant",
     system_instruction: str = GROUNDED_SYSTEM_PROMPT,
 ) -> str:
     """Generate answer using Groq API with graceful error handling.

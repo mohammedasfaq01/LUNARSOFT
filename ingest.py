@@ -22,12 +22,21 @@ def get_embeddings() -> HuggingFaceEmbeddings:
     """Return local HuggingFace embedding model (all-MiniLM-L6-v2).
 
     Disables tqdm progress bars which cause OSError in non‑tty environments like Streamlit.
+    Sets an explicit cache_folder to a writable path to prevent Windows OSError 22 (invalid
+    argument) when the default HF hub cache resolves to a path with spaces/Unicode characters.
     """
-    # Suppress progress bars and parallel tokenizers warnings in Streamlit
+    import pathlib
+
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+    # Explicit writable cache dir avoids Windows path-resolution errors
+    cache_dir = str(pathlib.Path.home() / ".cache" / "huggingface" / "mini_ai_rag")
+    os.makedirs(cache_dir, exist_ok=True)
+
     return HuggingFaceEmbeddings(
         model_name=EMBEDDING_MODEL_NAME,
+        cache_folder=cache_dir,
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True, "show_progress_bar": False},
     )
