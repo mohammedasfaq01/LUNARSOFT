@@ -38,7 +38,7 @@ def get_embeddings() -> HuggingFaceEmbeddings:
         model_name=EMBEDDING_MODEL_NAME,
         cache_folder=cache_dir,
         model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True, "show_progress_bar": False},
+        encode_kwargs={"normalize_embeddings": True},
     )
 
 
