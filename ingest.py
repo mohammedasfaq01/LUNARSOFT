@@ -1,6 +1,16 @@
 """Document ingestion and vector store module for Mini AI Knowledge Assistant."""
 
 import os
+
+# ── Silence tqdm / HuggingFace / Transformers before any ML import ───────────
+# Prevents OSError 22 on Windows where Streamlit's stdout is not a real TTY.
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("DISABLE_TQDM", "true")
+
 from pathlib import Path
 from typing import List, Optional
 
@@ -21,25 +31,38 @@ DEFAULT_INDEX_DIR = "faiss_index"
 def get_embeddings() -> HuggingFaceEmbeddings:
     """Return local HuggingFace embedding model (all-MiniLM-L6-v2).
 
-    Disables tqdm progress bars which cause OSError in non‑tty environments like Streamlit.
-    Sets an explicit cache_folder to a writable path to prevent Windows OSError 22 (invalid
-    argument) when the default HF hub cache resolves to a path with spaces/Unicode characters.
+    Uses an explicit cache_folder (writable path) and redirects all tqdm output
+    to a null sink to prevent OSError 22 on Windows non-TTY streams (Streamlit).
     """
     import pathlib
+    import io
+    import contextlib
 
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    # Force-set all progress/warning suppression vars (belt-and-suspenders)
+    for key, val in {
+        "TQDM_DISABLE": "1",
+        "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+        "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1",
+        "TRANSFORMERS_VERBOSITY": "error",
+        "DISABLE_TQDM": "true",
+    }.items():
+        os.environ[key] = val
 
     # Explicit writable cache dir avoids Windows path-resolution errors
     cache_dir = str(pathlib.Path.home() / ".cache" / "huggingface" / "mini_ai_rag")
     os.makedirs(cache_dir, exist_ok=True)
 
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL_NAME,
-        cache_folder=cache_dir,
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True},
-    )
+    # Redirect stdout+stderr to null sink while loading the model.
+    # This catches any tqdm instance that still tries to write \r to a non-TTY stream.
+    _null = io.StringIO()
+    with contextlib.redirect_stdout(_null), contextlib.redirect_stderr(_null):
+        embeddings = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL_NAME,
+            cache_folder=cache_dir,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+    return embeddings
 
 
 def load_pdf(file_path: str) -> List:

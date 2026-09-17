@@ -1,6 +1,28 @@
 """Streamlit Chat Application for Mini AI Knowledge Assistant (RAG)."""
 
 import os
+
+# ── Silence all tqdm / HuggingFace / Transformers progress output ────────────
+# Must be set BEFORE importing sentence-transformers, transformers, or langchain
+# to prevent OSError 22 (Invalid argument) on Windows non-TTY streams (Streamlit).
+os.environ.setdefault("TQDM_DISABLE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("DISABLE_TQDM", "true")
+
+# Patch tqdm to write to a null sink as a final safety net
+import io as _io
+try:
+    import tqdm as _tqdm
+    _tqdm.tqdm.__init__.__defaults__ = tuple(
+        _io.StringIO() if i == 5 else d  # index 5 is the `file` param
+        for i, d in enumerate(_tqdm.tqdm.__init__.__defaults__ or [])
+    )
+except Exception:
+    pass
+
 import shutil
 import tempfile
 from pathlib import Path
