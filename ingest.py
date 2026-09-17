@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from langchain_community.document_loaders import PyPDFLoader, UnstructuredFileLoader
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 
@@ -58,22 +58,52 @@ def load_pdf(file_path: str) -> List:
 
 
 def load_file(file_path: str) -> List:
-    """Load a document of various supported types using appropriate loader.
-    Supports PDF, DOCX/DOC, PPTX/PPT via UnstructuredFileLoader.
-    Returns a list of LangChain Document objects with `source` metadata.
+    """Load a document of supported types using lightweight, purpose-specific loaders.
+
+    Supports:
+      - PDF  → PyPDFLoader (preserves page numbers)
+      - DOCX/DOC → Docx2txtLoader (requires docx2txt)
+      - PPTX/PPT → python-pptx (one Document per slide)
     """
     ext = Path(file_path).suffix.lower()
+    filename = Path(file_path).name
+
     if ext == ".pdf":
         return load_pdf(file_path)
-    # Fallback to UnstructuredFileLoader for other formats
-    loader = UnstructuredFileLoader(file_path)
-    docs = loader.load()
-    filename = Path(file_path).name
-    for doc in docs:
-        # Unstructured loader may not provide page number; default to 1
-        doc.metadata.setdefault("page", 1)
-        doc.metadata["source"] = filename
-    return docs
+
+    if ext in (".docx", ".doc"):
+        loader = Docx2txtLoader(file_path)
+        docs = loader.load()
+        for doc in docs:
+            doc.metadata.setdefault("page", 1)
+            doc.metadata["source"] = filename
+        return docs
+
+    if ext in (".pptx", ".ppt"):
+        from pptx import Presentation
+        from langchain_core.documents import Document
+
+        prs = Presentation(file_path)
+        docs = []
+        for slide_num, slide in enumerate(prs.slides, start=1):
+            text_parts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        line = " ".join(run.text for run in para.runs).strip()
+                        if line:
+                            text_parts.append(line)
+            slide_text = "\n".join(text_parts).strip()
+            if slide_text:
+                docs.append(
+                    Document(
+                        page_content=slide_text,
+                        metadata={"source": filename, "page": slide_num},
+                    )
+                )
+        return docs
+
+    raise ValueError(f"Unsupported file type: {ext}. Supported: PDF, DOCX, PPTX.")
 
 
 def chunk_documents(
