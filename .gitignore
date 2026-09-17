@@ -1,0 +1,20 @@
+# Environments
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Local Data & Indexes
+faiss_index/
+faiss_eval_index/
+temp_uploads/
+
+# Secrets & Credentials
+.env
+.streamlit/secrets.toml
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
