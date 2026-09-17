@@ -154,6 +154,58 @@ with st.sidebar:
             st.success("Sample documents loaded and indexed!")
             st.rerun()
 
+    # ── Local Path Indexing ──────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📁 Index from Local Path")
+    st.caption("Enter a file path or a folder path. All supported files inside a folder will be indexed.")
+
+    local_path_input = st.text_input(
+        "File or Folder Path",
+        placeholder=r"e.g. C:\Users\You\Documents\reports  or  C:\report.pdf",
+        help="Supports PDF, DOCX, DOC, PPTX, PPT. For folders, all matching files are indexed recursively.",
+    )
+    index_path_clicked = st.button("📥 Index from Path", use_container_width=True)
+
+    if index_path_clicked:
+        raw_path = local_path_input.strip().strip('"').strip("'")
+        if not raw_path:
+            st.warning("Please enter a file or folder path.")
+        else:
+            target = Path(raw_path)
+            SUPPORTED_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".ppt"}
+            if not target.exists():
+                st.error(f"Path not found: `{raw_path}`")
+            else:
+                with st.spinner(f"Scanning and indexing from `{target.name}`..."):
+                    try:
+                        if target.is_file():
+                            if target.suffix.lower() not in SUPPORTED_EXTS:
+                                st.error(f"Unsupported file type: `{target.suffix}`. Use PDF, DOCX, or PPTX.")
+                                file_paths = []
+                            else:
+                                file_paths = [str(target)]
+                                doc_names = [target.name]
+                        else:
+                            # Recursively collect all supported files in folder
+                            file_paths = [
+                                str(p) for p in sorted(target.rglob("*"))
+                                if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+                            ]
+                            doc_names = [Path(p).name for p in file_paths]
+
+                        if file_paths:
+                            if not doc_names:
+                                doc_names = [Path(p).name for p in file_paths]
+                            vs = ingest_multiple_files(file_paths, index_dir=DEFAULT_INDEX_DIR)
+                            st.session_state.vector_store = vs
+                            st.session_state.indexed_docs = doc_names
+                            st.success(f"✅ Indexed {len(doc_names)} document(s) from `{target.name}`!")
+                            st.rerun()
+                        elif target.exists():
+                            st.warning("No supported documents found at that path.")
+                    except Exception as e:
+                        st.error(f"Error during ingestion: {str(e)}")
+
     # Display Index Status
     if st.session_state.vector_store is not None:
         st.success("✅ Knowledge Base Active (FAISS loaded)")
@@ -164,7 +216,7 @@ with st.sidebar:
         else:
             st.caption("Indexed chunks loaded from disk.")
     else:
-        st.info("ℹ️ No active index. Upload PDFs to get started.")
+        st.info("ℹ️ No active index. Upload documents or enter a path to get started.")
 
     st.divider()
     if st.button("🗑️ Clear Chat History", use_container_width=True):
