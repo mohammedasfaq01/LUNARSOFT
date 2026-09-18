@@ -58,36 +58,68 @@ def format_context(docs: List[Any]) -> Tuple[str, List[Dict[str, Any]]]:
 def call_gemini(
     prompt: str,
     api_key: str,
-    model: str = "gemini-1.5-flash",
+    model: str = "gemini-2.5-flash",
     system_instruction: str = GROUNDED_SYSTEM_PROMPT,
 ) -> str:
-    """Generate answer using Google Gemini API."""
+    """Generate answer using Google Gemini API with fallback model handling."""
+    models_to_try = [model]
+    for fallback in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-1.5-pro"]:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
+
+    last_error = ""
+
+    # Try via google-genai SDK first
     try:
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.0,
-            ),
-        )
-        return response.text.strip() if response.text else "Not found in the provided documents."
+        for m in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.0,
+                    ),
+                )
+                if response and response.text:
+                    return response.text.strip()
+                return "Not found in the provided documents."
+            except Exception as e:
+                last_error = str(e)
+                continue
     except ImportError:
-        # Fallback to legacy google.generativeai if google-genai is not installed
+        pass
+
+    # Fallback to legacy google.generativeai SDK
+    try:
         import google.generativeai as legacy_genai
 
         legacy_genai.configure(api_key=api_key)
-        gemini_model = legacy_genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system_instruction,
-            generation_config={"temperature": 0.0},
-        )
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip() if response.text else "Not found in the provided documents."
+        for m in models_to_try:
+            try:
+                gemini_model = legacy_genai.GenerativeModel(
+                    model_name=m,
+                    system_instruction=system_instruction,
+                    generation_config={"temperature": 0.0},
+                )
+                response = gemini_model.generate_content(prompt)
+                if response and response.text:
+                    return response.text.strip()
+                return "Not found in the provided documents."
+            except Exception as e:
+                last_error = str(e)
+                continue
+    except Exception as e:
+        last_error = str(e)
+
+    return (
+        f"Error: Unable to generate response via Gemini API ({last_error}). "
+        "Please check your API key and model selection, or switch to the Offline Grounded Engine."
+    )
 
 
 def call_groq(
@@ -96,32 +128,38 @@ def call_groq(
     model: str = "llama-3.1-8b-instant",
     system_instruction: str = GROUNDED_SYSTEM_PROMPT,
 ) -> str:
-    """Generate answer using Groq API with graceful error handling.
+    """Generate answer using Groq API with graceful error and model fallback handling."""
+    models_to_try = [model]
+    for fallback in ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768", "gemma2-9b-it"]:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
 
-    Returns a user-friendly error message when the model is unavailable or other issues occur.
-    """
+    last_error = ""
     try:
-        from groq import Groq, NotFoundError
+        from groq import Groq
         client = Groq(api_key=api_key)
-        chat_completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-        )
-        return chat_completion.choices[0].message.content.strip()
-    except NotFoundError:
-        return (
-            "Error: The selected Groq model is not available. "
-            "Please choose a different model or use the offline provider."
-        )
+        for m in models_to_try:
+            try:
+                chat_completion = client.chat.completions.create(
+                    model=m,
+                    messages=[
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.0,
+                )
+                if chat_completion.choices and chat_completion.choices[0].message.content:
+                    return chat_completion.choices[0].message.content.strip()
+            except Exception as e:
+                last_error = str(e)
+                continue
     except Exception as e:
-        return (
-            f"Error: Unable to generate response via Groq ({type(e).__name__}). "
-            "Check your API key and model selection, or switch to another provider."
-        )
+        last_error = str(e)
+
+    return (
+        f"Error: Unable to generate response via Groq API ({last_error}). "
+        "Please check your API key and model selection, or switch to the Offline Grounded Engine."
+    )
 
 
 def call_offline_grounded(query: str, docs: List[Any]) -> str:

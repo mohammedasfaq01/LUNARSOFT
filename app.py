@@ -12,12 +12,12 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("DISABLE_TQDM", "true")
 
-# Patch tqdm to write to a null sink as a final safety net
+# Patch tqdm to write to a null sink — catches any tqdm already imported
 import io as _io
 try:
     import tqdm as _tqdm
     _tqdm.tqdm.__init__.__defaults__ = tuple(
-        _io.StringIO() if i == 5 else d  # index 5 is the `file` param
+        _io.StringIO() if i == 5 else d
         for i, d in enumerate(_tqdm.tqdm.__init__.__defaults__ or [])
     )
 except Exception:
@@ -29,6 +29,8 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from ingest import (
     DEFAULT_INDEX_DIR,
     ingest_multiple_files,
@@ -36,17 +38,31 @@ from ingest import (
 )
 from rag import query_rag
 
-load_dotenv()
-
 st.set_page_config(
     page_title="Mini AI Knowledge Assistant",
     page_icon="📚",
     layout="wide",
 )
 
+# ── Cached helpers ────────────────────────────────────────────────────────────
 
-def get_secret(key_name: str) -> str:
-    """Retrieve secret from Streamlit secrets or OS environment."""
+@st.cache_resource(show_spinner=False)
+def _cached_load_vector_store(index_dir: str):
+    """Load FAISS vector store + embedding model once per server process.
+
+    @st.cache_resource persists the result across Streamlit reruns and across
+    multiple user sessions — the heavy model is loaded from disk only once.
+    Call _cached_load_vector_store.clear() before re-indexing to invalidate.
+    """
+    _idx = Path(index_dir) / "index.faiss"
+    if not _idx.exists():
+        return None
+    return load_vector_store(index_dir)
+
+
+@st.cache_data(show_spinner=False)
+def _get_secret(key_name: str) -> str:
+    """Cache secret lookups so st.secrets is not queried on every rerun."""
     try:
         if key_name in st.secrets:
             return st.secrets[key_name]
@@ -55,27 +71,42 @@ def get_secret(key_name: str) -> str:
     return os.getenv(key_name, "")
 
 
-# Initialize Session States
+# ── Session State Initialization ──────────────────────────────────────────────
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "vector_store" not in st.session_state:
-    # Ensure the index directory exists before attempting to load
     os.makedirs(DEFAULT_INDEX_DIR, exist_ok=True)
-    # Attempt to load previously persisted FAISS index if available
-    st.session_state.vector_store = load_vector_store(DEFAULT_INDEX_DIR)
+    # Fast path: skip heavy model load if no FAISS index exists yet
+    if (Path(DEFAULT_INDEX_DIR) / "index.faiss").exists():
+        st.session_state.vector_store = _cached_load_vector_store(DEFAULT_INDEX_DIR)
+    else:
+        st.session_state.vector_store = None
 
 if "indexed_docs" not in st.session_state:
     st.session_state.indexed_docs = []
 
-# Sidebar Configuration
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _do_index(file_paths: list, doc_names: list) -> None:
+    """Build FAISS index, update session state, and clear the resource cache."""
+    vs = ingest_multiple_files(file_paths, index_dir=DEFAULT_INDEX_DIR)
+    _cached_load_vector_store.clear()   # invalidate cache so next load picks up new index
+    st.session_state.vector_store = vs
+    st.session_state.indexed_docs = doc_names
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
 with st.sidebar:
     st.title("⚙️ Settings & Ingestion")
 
     provider_options = ["Offline Grounded Engine (No API Key Required)", "Gemini", "Groq"]
-    default_gemini_key = get_secret("GEMINI_API_KEY") or get_secret("GOOGLE_API_KEY")
-    default_groq_key = get_secret("GROQ_API_KEY")
-    
+    default_gemini_key = _get_secret("GEMINI_API_KEY") or _get_secret("GOOGLE_API_KEY")
+    default_groq_key = _get_secret("GROQ_API_KEY")
+
     default_provider_idx = 1 if default_gemini_key else (2 if default_groq_key else 0)
 
     provider = st.selectbox(
@@ -94,7 +125,7 @@ with st.sidebar:
         )
         model_name = st.selectbox(
             "Model",
-            options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash"],
+            options=["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-1.5-pro"],
             index=0,
         )
         if not api_key:
@@ -108,8 +139,8 @@ with st.sidebar:
         )
         model_name = st.selectbox(
             "Model",
-            options=["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
-            index=1,  # default to free-tier model likely available
+            options=["llama-3.1-8b-instant", "llama3-8b-8192", "mixtral-8x7b-32768"],
+            index=0,
         )
         if not api_key:
             st.info("💡 Don't have an API key? Switch to 'Offline Grounded Engine' to test without a key.")
@@ -118,6 +149,7 @@ with st.sidebar:
         model_name = "offline-grounded"
         st.success("🟢 Local CPU Grounded Engine active. Zero external API calls.")
 
+    # ── Upload Section ────────────────────────────────────────────────────────
     st.divider()
     st.subheader("📄 Document Knowledge Base")
 
@@ -140,28 +172,23 @@ with st.sidebar:
         else:
             with st.spinner("Extracting, chunking, and indexing documents..."):
                 temp_dir = tempfile.mkdtemp(prefix="rag_docs_")
-                saved_paths = []
-                doc_names = []
+                saved_paths, doc_names = [], []
                 try:
                     for up_file in uploaded_files:
-                        temp_file_path = os.path.join(temp_dir, up_file.name)
-                        with open(temp_file_path, "wb") as f:
+                        tmp_path = os.path.join(temp_dir, up_file.name)
+                        with open(tmp_path, "wb") as f:
                             f.write(up_file.getbuffer())
-                        saved_paths.append(temp_file_path)
+                        saved_paths.append(tmp_path)
                         doc_names.append(up_file.name)
-
-                    # Build FAISS index from multiple documents
-                    vs = ingest_multiple_files(saved_paths, index_dir=DEFAULT_INDEX_DIR)
-                    st.session_state.vector_store = vs
-                    st.session_state.indexed_docs = doc_names
-                    st.success(f"Successfully indexed {len(doc_names)} document(s)!")
+                    _do_index(saved_paths, doc_names)
+                    st.success(f"✅ Indexed {len(doc_names)} document(s)!")
                 except Exception as e:
-                    st.error(f"Error during ingestion: {str(e)}")
+                    st.error(f"Error during ingestion: {e}")
                 finally:
                     shutil.rmtree(temp_dir, ignore_errors=True)
 
     if load_samples_clicked:
-        with st.spinner("Indexing sample multi-document PDFs (Apollo & Security)..."):
+        with st.spinner("Indexing sample PDFs (Apollo & Security)..."):
             sample_dir = Path(__file__).parent / "sample_docs"
             if not (sample_dir / "project_apollo.pdf").exists():
                 from eval import setup_sample_documents
@@ -170,21 +197,22 @@ with st.sidebar:
                 str(sample_dir / "project_apollo.pdf"),
                 str(sample_dir / "security_policy.pdf"),
             ]
-            vs = ingest_multiple_files(samples, index_dir=DEFAULT_INDEX_DIR)
-            st.session_state.vector_store = vs
-            st.session_state.indexed_docs = ["project_apollo.pdf", "security_policy.pdf"]
-            st.success("Sample documents loaded and indexed!")
-            st.rerun()
+            try:
+                _do_index(samples, ["project_apollo.pdf", "security_policy.pdf"])
+                st.success("Sample documents loaded and indexed!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error during ingestion: {e}")
 
-    # ── Local Path Indexing ──────────────────────────────────────────────────
+    # ── Local Path Indexing ───────────────────────────────────────────────────
     st.divider()
     st.subheader("📁 Index from Local Path")
-    st.caption("Enter a file path or a folder path. All supported files inside a folder will be indexed.")
+    st.caption("Enter a file path or folder. All supported files in a folder are indexed recursively.")
 
     local_path_input = st.text_input(
         "File or Folder Path",
         placeholder=r"e.g. C:\Users\You\Documents\reports  or  C:\report.pdf",
-        help="Supports PDF, DOCX, DOC, PPTX, PPT. For folders, all matching files are indexed recursively.",
+        help="Supports PDF, DOCX, DOC, PPTX, PPT.",
     )
     index_path_clicked = st.button("📥 Index from Path", use_container_width=True)
 
@@ -202,33 +230,29 @@ with st.sidebar:
                     try:
                         if target.is_file():
                             if target.suffix.lower() not in SUPPORTED_EXTS:
-                                st.error(f"Unsupported file type: `{target.suffix}`. Use PDF, DOCX, or PPTX.")
+                                st.error(f"Unsupported type: `{target.suffix}`. Use PDF, DOCX, or PPTX.")
                                 file_paths = []
                             else:
                                 file_paths = [str(target)]
                                 doc_names = [target.name]
                         else:
-                            # Recursively collect all supported files in folder
-                            file_paths = [
-                                str(p) for p in sorted(target.rglob("*"))
+                            file_paths = sorted(
+                                str(p) for p in target.rglob("*")
                                 if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
-                            ]
+                            )
                             doc_names = [Path(p).name for p in file_paths]
 
                         if file_paths:
-                            if not doc_names:
-                                doc_names = [Path(p).name for p in file_paths]
-                            vs = ingest_multiple_files(file_paths, index_dir=DEFAULT_INDEX_DIR)
-                            st.session_state.vector_store = vs
-                            st.session_state.indexed_docs = doc_names
+                            _do_index(file_paths, doc_names)
                             st.success(f"✅ Indexed {len(doc_names)} document(s) from `{target.name}`!")
                             st.rerun()
-                        elif target.exists():
+                        else:
                             st.warning("No supported documents found at that path.")
                     except Exception as e:
-                        st.error(f"Error during ingestion: {str(e)}")
+                        st.error(f"Error during ingestion: {e}")
 
-    # Display Index Status
+    # ── Index Status ──────────────────────────────────────────────────────────
+    st.divider()
     if st.session_state.vector_store is not None:
         st.success("✅ Knowledge Base Active (FAISS loaded)")
         if st.session_state.indexed_docs:
@@ -240,19 +264,20 @@ with st.sidebar:
     else:
         st.info("ℹ️ No active index. Upload documents or enter a path to get started.")
 
-    st.divider()
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
-# Main Chat Interface
+
+# ── Main Chat Interface ───────────────────────────────────────────────────────
+
 st.title("🤖 Mini AI Knowledge Assistant")
 st.caption(
     "Strictly grounded RAG assistant powered by FAISS, "
     "`all-MiniLM-L6-v2`, and verifiable page-level citations."
 )
 
-# Render Chat History
+# Render chat history
 for msg in st.session_state.messages:
     role = msg["role"]
     with st.chat_message(role):
@@ -265,16 +290,14 @@ for msg in st.session_state.messages:
                     )
                     st.caption(f"> {src['snippet']}")
 
-# User Query Input
+# Chat input
 user_query = st.chat_input("Ask a question about your uploaded documents...")
 
 if user_query:
-    # 1. Display and save user query
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.markdown(user_query)
 
-    # 2. Generate response via RAG
     with st.chat_message("assistant"):
         with st.spinner("Retrieving context and generating grounded answer..."):
             result = query_rag(
@@ -288,21 +311,16 @@ if user_query:
             answer_text = result["answer"]
             citations = result.get("sources", [])
 
-            st.markdown(answer_text)
+        st.markdown(answer_text)
 
-            if citations:
-                with st.expander(f"📚 View Sources & Citations ({len(citations)} chunks)"):
-                    for idx, src in enumerate(citations, start=1):
-                        st.markdown(
-                            f"**Citation {idx}**: 📄 `{src['source']}` — **Page {src['page']}**"
-                        )
-                        st.caption(f"> {src['snippet']}")
+        if citations:
+            with st.expander(f"📚 View Sources & Citations ({len(citations)} chunks)"):
+                for idx, src in enumerate(citations, start=1):
+                    st.markdown(
+                        f"**Citation {idx}**: 📄 `{src['source']}` — **Page {src['page']}**"
+                    )
+                    st.caption(f"> {src['snippet']}")
 
-    # 3. Persist assistant message in session state
     st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": answer_text,
-            "sources": citations,
-        }
+        {"role": "assistant", "content": answer_text, "sources": citations}
     )

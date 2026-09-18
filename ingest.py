@@ -11,6 +11,7 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("DISABLE_TQDM", "true")
 
+import functools
 from pathlib import Path
 from typing import List, Optional
 
@@ -28,6 +29,7 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_INDEX_DIR = "faiss_index"
 
 
+@functools.lru_cache(maxsize=1)
 def get_embeddings() -> HuggingFaceEmbeddings:
     """Return local HuggingFace embedding model (all-MiniLM-L6-v2).
 
