@@ -61,15 +61,40 @@ def call_gemini(
     model: str = "gemini-2.5-flash",
     system_instruction: str = GROUNDED_SYSTEM_PROMPT,
 ) -> str:
-    """Generate answer using Google Gemini API with fallback model handling."""
-    models_to_try = [model]
-    for fallback in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-1.5-pro"]:
-        if fallback not in models_to_try:
-            models_to_try.append(fallback)
+    """Generate answer using Google Gemini API with dynamic model listing & fallbacks."""
+    clean_model = model.replace("models/", "")
+    models_to_try = []
 
-    last_error = ""
+    def add_model(m_name: str):
+        if not m_name:
+            return
+        short = m_name.replace("models/", "")
+        prefixed = f"models/{short}" if not m_name.startswith("models/") else m_name
+        for name in [short, prefixed]:
+            if name not in models_to_try:
+                models_to_try.append(name)
 
-    # Try via google-genai SDK first
+    # 1. Add user-selected model first
+    add_model(clean_model)
+
+    # 2. Try fetching live available models for this specific API key
+    try:
+        from google import genai
+        client_tmp = genai.Client(api_key=api_key)
+        for lm in client_tmp.models.list():
+            lm_name = getattr(lm, "name", "")
+            if lm_name and ("gemini" in lm_name.lower()):
+                add_model(lm_name)
+    except Exception:
+        pass
+
+    # 3. Add standard fallback models in priority order
+    for default_m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b", "gemini-1.5-flash", "gemini-1.5-pro"]:
+        add_model(default_m)
+
+    errors_logged = []
+
+    # Attempt via modern google-genai SDK
     try:
         from google import genai
         from google.genai import types
@@ -85,16 +110,18 @@ def call_gemini(
                         temperature=0.0,
                     ),
                 )
-                if response and response.text:
-                    return response.text.strip()
-                return "Not found in the provided documents."
+                if response:
+                    text_out = getattr(response, "text", None)
+                    if text_out and text_out.strip():
+                        return text_out.strip()
+                    return "Not found in the provided documents."
             except Exception as e:
-                last_error = str(e)
+                errors_logged.append(f"{m} ({e})")
                 continue
     except ImportError:
         pass
 
-    # Fallback to legacy google.generativeai SDK
+    # Attempt via legacy google.generativeai SDK if modern SDK is unavailable or failed
     try:
         import google.generativeai as legacy_genai
 
@@ -107,18 +134,21 @@ def call_gemini(
                     generation_config={"temperature": 0.0},
                 )
                 response = gemini_model.generate_content(prompt)
-                if response and response.text:
-                    return response.text.strip()
-                return "Not found in the provided documents."
+                if response:
+                    text_out = getattr(response, "text", None)
+                    if text_out and text_out.strip():
+                        return text_out.strip()
+                    return "Not found in the provided documents."
             except Exception as e:
-                last_error = str(e)
+                errors_logged.append(f"{m} ({e})")
                 continue
     except Exception as e:
-        last_error = str(e)
+        errors_logged.append(f"init ({e})")
 
+    first_err = errors_logged[0] if errors_logged else "Unknown error"
     return (
-        f"Error: Unable to generate response via Gemini API ({last_error}). "
-        "Please check your API key and model selection, or switch to the Offline Grounded Engine."
+        f"Error: Unable to generate response via Gemini API ({first_err}). "
+        "Please check your Gemini API key in the sidebar, or switch to the 'Offline Grounded Engine'."
     )
 
 
@@ -134,7 +164,7 @@ def call_groq(
         if fallback not in models_to_try:
             models_to_try.append(fallback)
 
-    last_error = ""
+    errors_logged = []
     try:
         from groq import Groq
         client = Groq(api_key=api_key)
@@ -151,14 +181,15 @@ def call_groq(
                 if chat_completion.choices and chat_completion.choices[0].message.content:
                     return chat_completion.choices[0].message.content.strip()
             except Exception as e:
-                last_error = str(e)
+                errors_logged.append(f"{m} ({e})")
                 continue
     except Exception as e:
-        last_error = str(e)
+        errors_logged.append(f"init ({e})")
 
+    first_err = errors_logged[0] if errors_logged else "Unknown error"
     return (
-        f"Error: Unable to generate response via Groq API ({last_error}). "
-        "Please check your API key and model selection, or switch to the Offline Grounded Engine."
+        f"Error: Unable to generate response via Groq API ({first_err}). "
+        "Please check your Groq API key in the sidebar, or switch to the 'Offline Grounded Engine'."
     )
 
 
